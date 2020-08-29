@@ -27,7 +27,7 @@ def w2f_preprocess(data, y, binary, t, k):
         
     return new_data1, new_data2, target, binary_target, initial 
 
-class Encoder(tf.keras.models.Model):
+class Encoder(tf.keras.layers.Layer):
     def __init__(self, d_model, l2_regularizer=0, dropout=0): 
         super(Encoder, self).__init__()        
 
@@ -56,7 +56,7 @@ class Encoder(tf.keras.models.Model):
         
         return lst_hidden2, lst_cell_state2
 
-class Decoder(tf.keras.models.Model):
+class Decoder(tf.keras.layers.Layer):
     def __init__(self, d_model, k, l2_regularizer=0, dropout=0): 
         super(Decoder, self).__init__()
         self.k = k
