@@ -57,7 +57,7 @@ class Encoder(tf.keras.models.Model):
         return lst_hidden2, lst_cell_state2
 
 class Decoder(tf.keras.models.Model):
-    def __init__(self, d_model, k, l2_regularizer=0, dropout=0): # d_model: LSTM cell의 ouput dimension
+    def __init__(self, d_model, k, l2_regularizer=0, dropout=0): 
         super(Decoder, self).__init__()
         self.k = k
         
