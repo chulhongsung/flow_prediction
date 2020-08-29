@@ -27,7 +27,7 @@ def w2f_preprocess(data, y, binary, t, k):
         
     return new_data1, new_data2, target, binary_target, initial 
 
-class Encoder(tf.keras.layers.Layer):
+class Encoder(keras.layers.Layer):
     def __init__(self, d_model, l2_regularizer=0, dropout=0): 
         super(Encoder, self).__init__()        
 
@@ -56,7 +56,7 @@ class Encoder(tf.keras.layers.Layer):
         
         return lst_hidden2, lst_cell_state2
 
-class Decoder(tf.keras.layers.Layer):
+class Decoder(keras.layers.Layer):
     def __init__(self, d_model, k, l2_regularizer=0, dropout=0): 
         super(Decoder, self).__init__()
         self.k = k
@@ -93,7 +93,7 @@ class Decoder(tf.keras.layers.Layer):
            
         return tf.squeeze(tf.transpose(tf.convert_to_tensor(output1), perm=[1, 0, 2, 3])), tf.squeeze(tf.transpose(tf.convert_to_tensor(output2), perm=[1, 0, 2, 3])) 
 
-class W2F(tf.keras.models.Model):
+class W2F(keras.models.Model):
     def __init__(self, d_model, k, l2_regularizer=0, dropout=0):
         super(W2F, self).__init__()
         self.encoder = Encoder(d_model, l2_regularizer, dropout)
