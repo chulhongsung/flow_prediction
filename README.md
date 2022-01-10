@@ -1,2 +1,6 @@
 # flow_prediction
-A flow prediction model using seq2seq
+
+## Benchmark models
+
+- Seq2Seq(w2f)
+- Temporal Fusion Transformers for Interpretable Multi-horizon Time Series Forecasting(tft)
