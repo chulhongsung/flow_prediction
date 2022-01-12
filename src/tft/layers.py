@@ -1,9 +1,33 @@
-#%%
-import numpy as np
-import os
 import tensorflow as tf
 from tensorflow import keras as K
-#%%
+
+class ContiFeatureEmbedding(K.layers.Layer):
+    def __init__(self, d_embedding, num_rv):
+        super(ContiFeatureEmbedding, self).__init__()
+        self.d_embedding = d_embedding
+        self.num_rv = num_rv
+        self.dense_layers = [K.layers.Dense(d_embedding) for _ in range(num_rv)]
+        
+    def call(self, x):
+        tmp_feature_list = []                    
+
+        for i in range(self.num_rv):
+            tmp_feature = self.dense_layers[i](x[:, :, i:i+1])            
+            tmp_feature_list.append(tmp_feature)
+
+        feature_list = tf.concat(tmp_feature_list, axis=-1) ### (batch_size, time_step, num_rv * d_embedding)
+        
+        return tf.reshape(feature_list, [feature_list.shape[0], feature_list.shape[1], self.num_rv, self.d_embedding])
+
+class CateFeatureEmbedding(K.layers.Layer):
+    def __init__(self, d_embedding, cat_dim):
+        super(CateFeatureEmbedding, self).__init__()
+        self.d_embedding = d_embedding
+        self.embedding_layer = K.layers.Embedding(input_dim=cat_dim, output_dim=d_embedding)
+        
+    def call(self, x):
+        return tf.expand_dims(self.embedding_layer(x), axis=2)
+
 class GLULN(K.layers.Layer):
     def __init__(self, d_model):
         super(GLULN, self).__init__()    
@@ -12,13 +36,12 @@ class GLULN(K.layers.Layer):
         self.layer_norm = K.layers.LayerNormalization()
         
     def call(self, x, y):
-        return self.layer_norm(tf.keras.layers.Multiply()([self.dense3(x),
-                                        self.dense4(x)]) + y)
-#%% Gating mechanism
+        return self.layer_norm(tf.keras.layers.Multiply()([self.dense1(x),
+                                        self.dense2(x)]) + y)
+
 class GatedResidualNetwork(K.layers.Layer):
     def __init__(self, d_model, dr): 
         super(GatedResidualNetwork, self).__init__()        
-        # lstm1: (t-k+1)시점부터 (t-1)시점까지의 기후자료만을 input으로 하는 LSTM layer
         self.dense1 = K.layers.Dense(d_model, activation='elu')        
         self.dense2 = K.layers.Dense(d_model)
         self.dropout = tf.keras.layers.Dropout(dr)
@@ -28,10 +51,10 @@ class GatedResidualNetwork(K.layers.Layer):
     def call(self, a):
         eta_2 = self.dense1(a)
         eta_1 = self.dropout(self.dense2(eta_2))
-        grn_output = self.glu_and_layer_norm(eta_1, a)
+        grn_output = self.glu_and_layer_norm(eta_1, eta_2)
         
         return grn_output
-#%% Variable selection network
+
 class VariableSelectionNetwork(K.layers.Layer):
     def __init__(self, d_model, d_input, dr):
         super(VariableSelectionNetwork, self).__init__()
@@ -40,42 +63,33 @@ class VariableSelectionNetwork(K.layers.Layer):
         self.dr = dr
         self.v_grn = GatedResidualNetwork(d_input, dr)
         self.softmax = K.layers.Softmax()
-        
-        
+        self.xi_grn = [GatedResidualNetwork(d_model, dr) for _ in range(self.d_input)]
+ 
     def call(self, xi):
         
-        Xi = tf.keras.layers.Flatten()(xi) # tf.reshape(xi, [tf.shape(xi)[0], 1, -1])
-        
+        Xi = tf.reshape(xi, [xi.shape[0], xi.shape[1], -1])
         weights = tf.expand_dims(self.softmax(self.v_grn(Xi)), axis=-1)
             
         tmp_xi_list = []                    
         
         for i in range(self.d_input):
-            tmp_xi = GatedResidualNetwork(self.d_model, self.dr)(xi[:, i:i+1, :])            
+            tmp_xi = self.xi_grn[i](xi[:, :, i:i+1, :])            
             tmp_xi_list.append(tmp_xi)
         
-        xi_list = tf.concat(tmp_xi_list, axis=1)
+        xi_list = tf.concat(tmp_xi_list, axis=2)
         combined = tf.keras.layers.Multiply()([weights, xi_list]) # attention
 
-        vsn_output = tf.reduce_sum(combined, axis=1) 
+        vsn_output = tf.reduce_sum(combined, axis=2) 
     
         return vsn_output
-    
-#%%
+
 def scaled_dot_product_attention(q, k, v, d_model, mask):
     matmul_qk = tf.matmul(q, k, transpose_b=True)  # (..., seq_len_q, seq_len_k)
-
-    # scale matmul_qk
     dk = tf.cast(d_model, tf.float32)
     scaled_attention_logits = matmul_qk / tf.math.sqrt(dk)
 
-    # add the mask to the scaled tensor.
     # mask_ = mask[:, tf.newaxis, ...] - 1 # (batch_size, num_heads, seq_len_q, seq_len_q)
-
     # scaled_attention_logits += (mask_ * 1e9)
-
-    # softmax is normalized on the last axis (seq_len_k) so that the scores
-    # add up to 1.
     attention_weights = K.layers.Softmax()(scaled_attention_logits)  # (..., seq_len_q, seq_len_k)
 
     output = tf.matmul(attention_weights, v)  # (..., seq_len_q, depth_v)
@@ -127,87 +141,108 @@ class InterpretableMultiHeadAttention(K.layers.Layer):
         output = self.dense(concat_attention)  # (batch_size, seq_len_q, d_model)
 
         return output, attention_weights
-#%%
-imha = InterpretableMultiHeadAttention(4, 2)
 
-tmp_x = tf.random.normal([2, 3, 4])
 
-imha(tmp_x, tmp_x, tmp_x)
-#%%
-
-#%%
 class TemporalFusionDecoder(K.layers.Layer):
     def __init__(self, d_model, dr, num_heads):
         super(TemporalFusionDecoder, self).__init__()
         self.d_model = d_model
         self.dr = dr
-        self.lstm_obs = K.layers.LSTM(d_model2,
-                                      return_sequence=True,
+        ### observed feature embedding        
+        self.lstm_obs = K.layers.LSTM(d_model,
+                                      return_sequences=True,
                                       return_state=True,
-                                      activation='tahn',
+                                      activation='tanh',
                                       recurrent_activation='sigmoid',
                                       recurrent_dropout=0,
                                       unroll=False,
                                       use_bias=True)
         
         self.lstm_future = K.layers.LSTM(d_model,
-                                return_sequence=True,
-                                activation='tahn',
+                                return_sequences=True,
+                                activation='tanh',
                                 recurrent_activation='sigmoid',
                                 recurrent_dropout=0,
                                 unroll=False,
                                 use_bias=True)        
 
-        self.glu_and_layer_norm1 = GLULN(d_model)
+        self.glu_and_layer_norm1= GLULN(d_model)
         
         self.imha = InterpretableMultiHeadAttention(d_model, num_heads=num_heads)
         
         self.glu_and_layer_norm2 = GLULN(d_model)
         
         
-    def call(self, obs_input, future_input):
-        obs_lstm, obs_h, obs_c = self.lstm_obs(obs_input)
-        future_lstm = self.lstm_future(future_input, initial_state=[obs_h, obs_c])
+    def call(self, vsn_obs_feature, vsn_future_feature):
+        time_step = tf.shape(vsn_obs_feature)[1] + tf.shape(vsn_future_feature)[1]
+        obs_lstm, obs_h, obs_c = self.lstm_obs(vsn_obs_feature)
+        future_lstm = self.lstm_future(vsn_future_feature, initial_state=[obs_h, obs_c])
+
+        lstm_hidden = tf.concat([obs_lstm, future_lstm], axis=1)    
+        input_vsn = tf.concat([vsn_obs_feature, vsn_future_feature], axis=1)
+
+        glu_phi_list = [] 
         
-        lstm_layer = tf.concat([obs_lstm, future_lstm], axis=1)    
-        input_embeddings = tf.concat([obs_input, future_input], axis=1)
-        
-        glu_phi = self.glu_and_layer_norm1(lstm_layer, input_embeddings)
-        B = self.imha(glu_phi, glu_phi, glu_phi)
-        delta = self.glu_and_layer_norm2(B, glu_phi)
-    
-        return delta, glu_phi
-#%% 
+        for j in range(time_step):
+            tmp_phi_t = self.glu_and_layer_norm1(lstm_hidden[:, j, :], input_vsn[:, j, :])
+            glu_phi_list.append(tf.expand_dims(tmp_phi_t, axis=1))
+
+        glu_phi = tf.concat(glu_phi_list, axis=1)
+
+        B, _ = self.imha(glu_phi, glu_phi, glu_phi) # imha output, weights
+
+        glu_delta_list = [] 
+
+        for j in range(time_step):
+            tmp_delta_t = self.glu_and_layer_norm2(B[:, j, :], glu_phi[:, j, :])
+            glu_delta_list.append(tf.expand_dims(tmp_delta_t, axis=1))
+
+        glu_delta = tf.concat(glu_delta_list, axis=1)
+
+        return glu_delta, glu_phi
+
 class PointWiseFeedForward(K.layers.Layer):
     def __init__(self, d_model, dr):
+        super(PointWiseFeedForward, self).__init__()
         self.grn = GatedResidualNetwork(d_model, dr)
         self.glu_and_layer_norm = GLULN(d_model)
-        
+
         
     def call(self, delta, phi):
-        varphi_ = self.grn(delta)
-        varphi = self.glu_and_layer_norm(varphi_, phi)
+        time_step = tf.shape(delta)[1]
         
+        grn_varphi_list = []
+
+        for t in range(time_step):
+            tmp_grn_varphi = self.grn(delta[:, t, :])
+            grn_varphi_list.append(tf.expand_dims(tmp_grn_varphi, axis=1))
+
+        grn_varphi = tf.concat(grn_varphi_list, axis=1)
+        
+        varphi_tilde_list = []
+        
+        for t in range(time_step):
+            tmp_varphi_tilde_list = self.glu_and_layer_norm(grn_varphi[:, t, :], phi[:, t, :])
+            varphi_tilde_list.append(tf.expand_dims(tmp_varphi_tilde_list, axis=1))
+            
+        varphi = tf.concat(varphi_tilde_list, axis=1)
+            
         return varphi
-#%%
-class TFT(K.models.Model):
-    def __init__(self, d_model, d_input, dr, cat_dim, cat_len, num_heads):
-        super(TFT, self).__init__()
-        self.d_model = d_model
-        self.dr = dr
-        self.embedding = K.layers.Embedding(input_dim=cat_len, output_dim=d_model, input_length=cat_dim)
-        self.vsn1 = K.layers.TimeDistributed(VariableSelectionNetwork(d_model, d_input, dr)) ### past input
-        self.vsn2 = K.layers.TimeDistributed(VariableSelectionNetwork(d_model, d_input, dr)) ### future input
-        self.tfd = TemporalFusionDecoder(d_model, dr, num_heads)
-        self.pwff = PointWiseFeedForward(d_model, dr)
-        
-        
-    def call(self, obs_inputs, future_inputs):
-        ### embdding 해서 xi 만들기
-        x1 = self.vsn1(obs_inputs)
-        x2 = self.vsn2(future_inputs)
-        
-        delta, glu_phi = self.tfd(x1, x2)
-        varphi = self.pwff(delta, glu_phi)
-        
-        return varphi
+
+class QuantileOutput(K.layers.Layer):
+    def __init__(self, tau, quantile):
+        super(QuantileOutput, self).__init__()
+        self.tau = tau
+        self.quantile = quantile
+        self.quantile_dense = [K.layers.Dense(1) for _ in range(len(quantile))]
+
+    def call(self, varphi):
+        total_output_list = []
+        for j in range(len(self.quantile)):
+            tmp_quantile_list = []
+            for t in range(self.tau):
+                tmp_quantile = self.quantile_dense[j](varphi[:, -self.tau + j, :])
+                tmp_quantile_list.append(tf.expand_dims(tmp_quantile, axis=1))
+            total_output_list.append(tf.transpose(tf.concat(tmp_quantile_list, axis=1), perm=[0, 2, 1]))
+
+        return tf.concat(total_output_list, axis=1)
